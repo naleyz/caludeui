@@ -68,8 +68,7 @@ void LayoutPanel::Draw()
 
     ImGui::Spacing();
     ImGui::TextColored(theme::palette::MidGray,
-                       "Потяните строку, чтобы поменять порядок панелей.\n"
-                       "Границу между панелями в сайдбаре можно тянуть мышью — так меняются пропорции.");
+                       "Потяните строку, чтобы поменять порядок панелей.");
     if (!error_.empty()) ImGui::TextColored({0.85f, 0.37f, 0.34f, 1.0f}, "%s", error_.c_str());
 
     if (changed) app_.SetSidebarPanels(panels, &error_);

@@ -305,6 +305,12 @@ std::optional<SessionUsage> ParseStatusLine(std::string_view json)
     out.sessionId = Str(root, "session_id");
     if (const Json* cost = Obj(root, "cost"))
         if (auto usd = Num(*cost, "total_cost_usd")) out.costUsd = *usd;
+    if (const Json* model = Obj(root, "model"))
+    {
+        out.model   = Str(*model, "display_name");
+        out.modelId = Str(*model, "id");
+    }
+    if (const Json* effort = Obj(root, "effort")) out.effort = Str(*effort, "level");
     if (const Json* limits = Obj(root, "rate_limits"))
     {
         out.fiveHour = ParseStatusWindow(*limits, "five_hour");
@@ -494,14 +500,19 @@ void Monitor::RunRefresh()
     std::error_code ec;
     fs::create_directories(probeDir_, ec);
 
+    // Same environment rules as a session: no parent-session variables, and
+    // the proxy chosen in Settings → ClaudeUI.
+    const net::ProxyEnv proxy = net::SessionProxyEnv();
     std::vector<std::string> envStrings;
     for (char** e = environ; e && *e; ++e)
     {
         std::string_view kv(*e);
         const std::string_view key = kv.substr(0, kv.find('='));
-        if (std::find(kInheritedSessionEnv.begin(), kInheritedSessionEnv.end(), key) == kInheritedSessionEnv.end())
-            envStrings.emplace_back(kv);
+        if (std::find(kInheritedSessionEnv.begin(), kInheritedSessionEnv.end(), key) != kInheritedSessionEnv.end()) continue;
+        if (std::find(proxy.unset.begin(), proxy.unset.end(), key) != proxy.unset.end()) continue;
+        envStrings.emplace_back(kv);
     }
+    for (const auto& [k, v] : proxy.set) envStrings.push_back(k + "=" + v);
     std::vector<char*> envp;
     for (auto& s : envStrings) envp.push_back(s.data());
     envp.push_back(nullptr);

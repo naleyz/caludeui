@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <mutex>
 #include <sstream>
 
 namespace net
@@ -188,18 +189,75 @@ Route DetectRoute(const RouteInputs& in, std::string_view apiHost)
     return r;
 }
 
+namespace
+{
+std::mutex   gProxyMu;
+SessionProxy gProxy;
+} // namespace
+
+void SetSessionProxy(SessionProxy proxy)
+{
+    std::lock_guard lock(gProxyMu);
+    gProxy = std::move(proxy);
+}
+
+SessionProxy GetSessionProxy()
+{
+    std::lock_guard lock(gProxyMu);
+    return gProxy;
+}
+
+ProxyEnv SessionProxyEnv()
+{
+    const SessionProxy p = GetSessionProxy();
+    ProxyEnv env;
+    if (p.mode == ProxyMode::System) return env;
+    env.unset = kProxyVars;
+    if (p.mode == ProxyMode::Custom && !p.url.empty())
+    {
+        // Claude Code reads HTTPS_PROXY/HTTP_PROXY; git, curl and friends it
+        // runs also look at ALL_PROXY — set them all so nothing leaks around it.
+        for (const char* k : {"https_proxy", "HTTPS_PROXY", "http_proxy", "HTTP_PROXY", "all_proxy", "ALL_PROXY"})
+            env.set.emplace_back(k, p.url);
+        if (!p.noProxy.empty())
+            for (const char* k : {"no_proxy", "NO_PROXY"}) env.set.emplace_back(k, p.noProxy);
+    }
+    return env;
+}
+
+std::string CheckProxyUrl(std::string_view url)
+{
+    if (url.empty()) return "укажите адрес прокси";
+    const std::string lower = Lower(url);
+    if (lower.starts_with("socks")) return "SOCKS Claude Code не поддерживает — нужен HTTP-прокси (http://хост:порт)";
+    if (!lower.starts_with("http://") && !lower.starts_with("https://")) return "адрес должен начинаться с http:// или https://";
+    const std::string_view rest = url.substr(url.find("://") + 3);
+    if (rest.empty() || rest.front() == ':' || rest.front() == '/') return "не указан хост";
+    return {};
+}
+
 Route DetectRoute()
 {
     RouteInputs in;
-    in.httpsProxy      = Env("https_proxy");
-    in.httpsProxyUpper = Env("HTTPS_PROXY");
-    in.httpProxy       = Env("http_proxy");
-    in.httpProxyUpper  = Env("HTTP_PROXY");
-    in.noProxy         = Env("no_proxy");
-    in.noProxyUpper    = Env("NO_PROXY");
+    const SessionProxy p = GetSessionProxy();
+    if (p.mode == ProxyMode::System)
+    {
+        in.httpsProxy      = Env("https_proxy");
+        in.httpsProxyUpper = Env("HTTPS_PROXY");
+        in.httpProxy       = Env("http_proxy");
+        in.httpProxyUpper  = Env("HTTP_PROXY");
+        in.noProxy         = Env("no_proxy");
+        in.noProxyUpper    = Env("NO_PROXY");
+    }
+    else if (p.mode == ProxyMode::Custom)
+    {
+        in.httpsProxy = p.url;
+        in.noProxy    = p.noProxy;
+    }
     // A proxy that applies to the API host decides the route by itself; only
     // otherwise is the (subprocess-backed) interface lookup worth doing.
     Route r = DetectRoute(in, kApiHost);
+    if (r.kind == RouteKind::Proxy && p.mode == ProxyMode::Custom) r.proxyVar = "настройки ClaudeUI";
     if (r.kind != RouteKind::Direct) return r;
     in.egressIface = EgressInterface();
     return DetectRoute(in, kApiHost);

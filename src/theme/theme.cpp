@@ -88,13 +88,46 @@ void Apply(Mode mode)
     colors[ImGuiCol_TableHeaderBg]          = panel;
     colors[ImGuiCol_TableRowBgAlt]          = WithAlpha(palette::Light, dark ? 0.025f : 0.3f);
 
+    if (dark)
+    {
+        // Redesign palette (rail + sidebar mockup): neutral surfaces, orange
+        // only for the primary action, checks, sliders and the active tab line.
+        auto rgb = [](int r, int g, int b) { return ImVec4{r / 255.0f, g / 255.0f, b / 255.0f, 1.0f}; };
+        const ImVec4 line   = rgb(0x2b, 0x2a, 0x27);
+        const ImVec4 field  = rgb(0x23, 0x23, 0x21);
+        const ImVec4 raised = rgb(0x2b, 0x2a, 0x27);
+        const ImVec4 hover  = rgb(0x34, 0x33, 0x2f);
+        colors[ImGuiCol_Border]               = line;
+        colors[ImGuiCol_Separator]            = line;
+        colors[ImGuiCol_FrameBg]              = field;
+        colors[ImGuiCol_FrameBgHovered]       = raised;
+        colors[ImGuiCol_FrameBgActive]        = raised;
+        colors[ImGuiCol_Button]               = raised;
+        colors[ImGuiCol_ButtonHovered]        = hover;
+        colors[ImGuiCol_ButtonActive]         = rgb(0x3d, 0x3c, 0x38);
+        colors[ImGuiCol_Header]               = raised;
+        colors[ImGuiCol_HeaderHovered]        = field;
+        colors[ImGuiCol_HeaderActive]         = hover;
+        colors[ImGuiCol_Tab]                  = WithAlpha(bg, 0.0f);
+        colors[ImGuiCol_TabHovered]           = field;
+        colors[ImGuiCol_TabSelected]          = raised;
+        colors[ImGuiCol_TabDimmed]            = WithAlpha(bg, 0.0f);
+        colors[ImGuiCol_TabDimmedSelected]    = field;
+        colors[ImGuiCol_TabSelectedOverline]  = palette::Orange;
+        colors[ImGuiCol_ScrollbarGrab]        = raised;
+        colors[ImGuiCol_ScrollbarGrabHovered] = hover;
+        colors[ImGuiCol_PopupBg]              = rgb(0x1c, 0x1c, 0x1a);
+        colors[ImGuiCol_TableRowBgAlt]        = WithAlpha(palette::Light, 0.02f);
+        colors[ImGuiCol_TextDisabled]         = rgb(0x8f, 0x8d, 0x85);
+    }
+
     style.WindowRounding    = 6.0f;
     style.ChildRounding     = 6.0f;
-    style.FrameRounding     = 4.0f;
+    style.FrameRounding     = 6.0f;
     style.PopupRounding     = 6.0f;
     style.ScrollbarRounding = 6.0f;
     style.GrabRounding      = 4.0f;
-    style.TabRounding       = 4.0f;
+    style.TabRounding       = 6.0f;
     style.WindowBorderSize  = 1.0f;
     style.FrameBorderSize   = 0.0f;
     style.PopupBorderSize   = 1.0f;

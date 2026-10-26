@@ -6,11 +6,9 @@
 
 namespace ui
 {
-// The "Панели" tab: lets the user show/hide and reorder the sidebar's
-// stacked panels (session list, limits/usage). Reordering is drag-and-drop;
-// resizing the proportion between panels happens directly in the sidebar
-// (ImGuiChildFlags_ResizeY on each panel's wrapper, see main.cpp), which
-// this tab just reminds the user about.
+// The "Панели" section: lets the user show/hide and reorder the session
+// sidebar's stacked panels (session list, limits card). Reordering is
+// drag-and-drop; the limits card sizes itself, the list takes the rest.
 class LayoutPanel
 {
 public:

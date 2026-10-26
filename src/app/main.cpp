@@ -3,19 +3,23 @@
 #include "config/model_catalog.hpp"
 #include "config/paths.hpp"
 #include "config/settings_store.hpp"
+#include "net/route.hpp"
 #include "renderer/vulkan_context.hpp"
 #include "sessions/live_sessions.hpp"
 #include "sessions/session_scanner.hpp"
 #include "theme/theme.hpp"
 #include "ui/fonts.hpp"
 #include "ui/icons.hpp"
+#include "ui/rail.hpp"
 #include "ui/layout_panel.hpp"
 #include "ui/new_session_dialog.hpp"
 #include "ui/session_list_panel.hpp"
 #include "ui/session_tabs.hpp"
 #include "ui/settings_panel.hpp"
+#include "ui/stats_view.hpp"
 #include "ui/usage_panel.hpp"
 #include "ui/util.hpp"
+#include "usage/model_usage.hpp"
 #include "usage/usage.hpp"
 
 #include <GLFW/glfw3.h>
@@ -154,6 +158,21 @@ struct CommandLine
 };
 
 // Returns -1 to continue, otherwise the process exit code.
+// Hands Settings → ClaudeUI → proxy to the network layer, which every launch,
+// VPN check and usage probe reads from.
+void ApplySessionProxy(const config::ProxySetting& p)
+{
+    net::SessionProxy sp;
+    sp.mode    = p.mode == config::ProxySetting::Mode::Custom ? net::ProxyMode::Custom
+                 : p.mode == config::ProxySetting::Mode::None ? net::ProxyMode::None
+                                                              : net::ProxyMode::System;
+    sp.url     = p.url;
+    sp.noProxy = p.noProxy;
+    // A custom proxy that isn't usable yet (being typed) falls back to the environment.
+    if (sp.mode == net::ProxyMode::Custom && !net::CheckProxyUrl(sp.url).empty()) sp.mode = net::ProxyMode::System;
+    net::SetSessionProxy(std::move(sp));
+}
+
 int ParseArgs(int argc, char** argv, CommandLine& out)
 {
     for (int i = 1; i < argc; ++i)
@@ -244,6 +263,7 @@ int main(int argc, char** argv)
     // Read before the fonts are built: the terminal face is one of them.
     config::AppSettingsStore appSettings;
     ui::fonts::Load(xscale, appSettings.Get().terminalFont);
+    ApplySessionProxy(appSettings.Get().sessionProxy); // before any tab (e.g. --new) launches
 
     theme::Apply(theme::Mode::Dark);
 
@@ -312,7 +332,8 @@ int main(int argc, char** argv)
                 spec.continueLast = true;
                 tabs.Open(std::move(spec), BaseName(cwd) + " (continue)");
             },
-        .rescan = [&] { rescanRequested = true; },
+        .rescan     = [&] { rescanRequested = true; },
+        .newSession = [&] { newSession.Open(); },
     });
 
     for (const auto& id : cli.resumeIds)
@@ -333,6 +354,12 @@ int main(int argc, char** argv)
         tabs.Open(std::move(spec), BaseName(dir));
     }
     bool selectSettingsTab = cli.showSettings;
+    ui::Section section    = ui::Section::Sessions;
+    ui::Rail    rail;
+    int         lastTabCount = 0;
+    usage::TranscriptUsage transcripts; // per-model tokens for the statistics view
+    transcripts.Refresh();              // background read, so the chart is ready when statistics open
+    ui::StatsView          statsView;
 
     // ── Main loop ────────────────────────────────────────────────────────
     QuitState quit            = QuitState::None;
@@ -423,6 +450,7 @@ int main(int argc, char** argv)
         {
             appliedSettingsRevision = appSettings.Revision();
             ui::fonts::SetTerminalFont(appSettings.Get().terminalFont);
+            ApplySessionProxy(appSettings.Get().sessionProxy);
         }
 
         ImGui_ImplVulkan_NewFrame();
@@ -444,61 +472,124 @@ int main(int argc, char** argv)
                 t->SetTitle(s->title); // picks up ai-title / /rename as they appear
         }
 
+        // ── Section: rail clicks, Ctrl+, and --settings ──────────────────
+        // A tab opened while statistics or settings fill the main area (from
+        // the session list, the new-session dialog) brings the terminal forward.
+        if (tabs.Count() > lastTabCount && section != ui::Section::Sessions) section = ui::Section::Sessions;
+        lastTabCount = tabs.Count();
+        if (std::exchange(selectSettingsTab, false)) section = ui::Section::Settings;
+        if (!io.WantTextInput && ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_Comma, ImGuiInputFlags_RouteGlobal))
+            section = section == ui::Section::Settings ? ui::Section::Sessions : ui::Section::Settings;
+
+        // Usage rows for the limits card and the statistics view.
+        std::vector<ui::UsagePanel::SessionRow> usageRows;
+        for (const auto& t : tabs.Tabs())
+        {
+            ui::UsagePanel::SessionRow row;
+            row.title   = t->Title();
+            row.running = t->Running();
+            if (const auto* u = usageMonitor.Session(t->Uid())) row.costUsd = u->costUsd;
+            usageRows.push_back(std::move(row));
+        }
+
+        constexpr ImVec4 kRailBg    {0x0f / 255.0f, 0x0f / 255.0f, 0x0e / 255.0f, 1.0f};
+        constexpr ImVec4 kSidebarBg {0x1a / 255.0f, 0x1a / 255.0f, 0x18 / 255.0f, 1.0f};
+        constexpr ImU32  kLine = IM_COL32(0x2b, 0x2a, 0x27, 255);
+
         ImGui::SetNextWindowPos({0, 0});
         ImGui::SetNextWindowSize(io.DisplaySize);
         ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {0, 0});
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
         ImGui::Begin("##root", nullptr,
                      ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
                          ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoBringToFrontOnFocus |
                          ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoScrollbar);
-        ImGui::PopStyleVar();
+        ImGui::PopStyleVar(3);
+        ImDrawList* rootDl = ImGui::GetWindowDrawList();
 
-        ImGui::BeginChild("##sidebar", {520.0f * xscale, 0}, ImGuiChildFlags_Borders | ImGuiChildFlags_ResizeX);
-        if (ImGui::BeginTabBar("##sidebar_tabs"))
+        // ── Rail ─────────────────────────────────────────────────────────
         {
-            if (ImGui::BeginTabItem(ui::icons::Label(ui::icons::Icon::Sessions, "Сессии###sessions")))
-            {
-                std::vector<ui::UsagePanel::SessionRow> usageRows;
-                for (const auto& t : tabs.Tabs())
-                {
-                    ui::UsagePanel::SessionRow row;
-                    row.title   = t->Title();
-                    row.running = t->Running();
-                    if (const auto* u = usageMonitor.Session(t->Uid())) row.costUsd = u->costUsd;
-                    usageRows.push_back(std::move(row));
-                }
+            ui::Rail::Info info;
+            info.runningTabs = tabs.RunningCount();
+            const auto& acct = usageMonitor.Account();
+            auto limit = [](const char* name, const usage::Window& w) {
+                ui::Rail::Limit l;
+                const bool expired = w.Expired(usage::NowMs());
+                l.usedPct = expired ? 0.0 : w.usedPct;
+                l.tier    = expired ? 0 : w.Tier();
+                l.tooltip = ui::LimitSummary(name, w);
+                return l;
+            };
+            if (acct.fiveHour) info.fiveHour = limit("5 часов", *acct.fiveHour);
+            if (acct.sevenDay) info.week = limit("Неделя", *acct.sevenDay);
 
-                // Sidebar panel stack: order/visibility from the "Панели" tab
-                // (appSettings.sidebarPanels). "usage" is Auto-sized (its own
-                // resizable, bordered box); "sessions" is the sole Stretch
-                // panel and gets whatever's left over, wherever the user has
-                // positioned it — BeginChild's "0 height = fill the rest"
-                // only works when it's the *last* child drawn in its parent,
-                // which isn't guaranteed once panels are reorderable, so the
-                // remaining height is computed explicitly up front instead.
+            ImGui::PushStyleColor(ImGuiCol_ChildBg, kRailBg);
+            ImGui::BeginChild("##rail", {ui::kRailWidth * xscale, 0}, ImGuiChildFlags_None,
+                              ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+            rail.Draw(section, info, xscale);
+            ImGui::EndChild();
+            ImGui::PopStyleColor();
+            const ImVec2 r = ImGui::GetItemRectMax();
+            rootDl->AddLine({r.x - 0.5f, 0}, {r.x - 0.5f, r.y}, kLine);
+        }
+        ImGui::SameLine(0, 0);
+
+        // ── Sidebar: what the rail selected ──────────────────────────────
+        auto sidebarTitle = [&](const char* text) {
+            ImGui::PushFont(nullptr, ImGui::GetFontSize() * 1.3f);
+            ImGui::TextUnformatted(text);
+            ImGui::PopFont();
+            ImGui::Dummy({0, 4});
+        };
+        // Statistics take the whole main area; every other section has the sidebar.
+        if (section != ui::Section::Stats)
+        {
+            ImGui::PushStyleColor(ImGuiCol_ChildBg, kSidebarBg);
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {14.0f * xscale, 14.0f * xscale});
+            ImGui::BeginChild("##sidebar_v2", {300.0f * xscale, 0}, ImGuiChildFlags_ResizeX | ImGuiChildFlags_AlwaysUseWindowPadding,
+                              section == ui::Section::Sessions ? ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse : 0);
+            ImGui::PopStyleVar();
+            ImGui::PopStyleColor();
+            switch (section)
+            {
+            case ui::Section::Sessions:
+            case ui::Section::Stats: // not reached: statistics have no sidebar
+            {
+                // Panel stack: order/visibility from the "Панели" section
+                // (appSettings.sidebarPanels). "usage" is the auto-sized limits
+                // card; "sessions" is the sole Stretch panel and gets whatever's
+                // left — computed up front, because BeginChild's "0 height = fill
+                // the rest" only works for the last child drawn, and panels can be
+                // reordered.
                 const auto& panels = appSettings.Get().sidebarPanels;
                 bool anyVisible = false;
                 float autoTotal = 0.0f;
-                const float usageDefaultH = lastUsageBoxH > 0 ? lastUsageBoxH : 200.0f * xscale;
                 for (const auto& p : panels)
                 {
                     if (!p.visible) continue;
                     anyVisible = true;
-                    if (p.id == "usage") autoTotal += usageDefaultH + ImGui::GetStyle().ItemSpacing.y;
+                    if (p.id == "usage") autoTotal += (lastUsageBoxH > 0 ? lastUsageBoxH : 150.0f * xscale) + 10.0f * xscale + ImGui::GetStyle().ItemSpacing.y;
                 }
                 if (!anyVisible)
-                    ImGui::TextColored(theme::palette::MidGray,
-                                       "Все панели скрыты — включите их во вкладке «Панели».");
+                    ImGui::TextColored(theme::palette::MidGray, "Все панели скрыты — включите их в разделе «Панели».");
                 const float stretchH = std::max(60.0f * xscale, ImGui::GetContentRegionAvail().y - autoTotal);
                 for (const auto& p : panels)
                 {
                     if (!p.visible) continue;
                     if (p.id == "usage")
                     {
-                        ImGui::BeginChild("##panel_usage", {0, usageDefaultH},
-                                          ImGuiChildFlags_Borders | ImGuiChildFlags_ResizeY);
-                        usagePanel.Draw(usageMonitor.Account(), usageRows, usageMonitor);
+                        ImGui::Dummy({0, 10.0f * xscale - ImGui::GetStyle().ItemSpacing.y});
+                        ImGui::PushStyleColor(ImGuiCol_ChildBg, theme::palette::Dark);
+                        ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 10.0f * xscale);
+                        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {14.0f * xscale, 12.0f * xscale});
+                        ImGui::BeginChild("##panel_usage", {0, 0},
+                                          ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_AlwaysUseWindowPadding,
+                                          ImGuiWindowFlags_NoScrollbar);
+                        if (usagePanel.DrawCompact(usageMonitor.Account(), usageRows)) section = ui::Section::Stats;
                         ImGui::EndChild();
+                        ImGui::PopStyleVar(2);
+                        ImGui::PopStyleColor();
                         lastUsageBoxH = ImGui::GetItemRectSize().y;
                     }
                     else if (p.id == "sessions")
@@ -508,27 +599,79 @@ int main(int argc, char** argv)
                         ImGui::EndChild();
                     }
                 }
-                ImGui::EndTabItem();
+                break;
             }
-            if (ImGui::BeginTabItem(ui::icons::Label(ui::icons::Icon::Settings, "Настройки###settings"), nullptr,
-                                    std::exchange(selectSettingsTab, false) ? ImGuiTabItemFlags_SetSelected : 0))
-            {
-                settingsPanel.Draw();
-                ImGui::EndTabItem();
-            }
-            if (ImGui::BeginTabItem(ui::icons::Label(ui::icons::Icon::More, "Панели###panels")))
-            {
+            case ui::Section::Panels:
+                sidebarTitle("Панели");
+                ImGui::PushTextWrapPos(0.0f);
                 layoutPanel.Draw();
-                ImGui::EndTabItem();
+                ImGui::PopTextWrapPos();
+                break;
+            case ui::Section::Settings:
+            {
+                sidebarTitle("Настройки");
+                const auto sections = ui::SettingsPanel::Sections();
+                const std::string& visible = settingsPanel.VisibleSection();
+                auto caption = [](const char* text) {
+                    ImGui::Dummy({0, 6});
+                    ImGui::TextColored(ImVec4{0.56f, 0.55f, 0.52f, 1.0f}, "%s", text);
+                };
+                for (std::size_t i = 0; i < sections.size(); ++i)
+                {
+                    if (i == 0) caption("Приложение");
+                    if (i == 1) caption("Claude Code · /config");
+                    if (ImGui::Selectable(sections[i].c_str(), sections[i] == visible, 0, {0, ImGui::GetFrameHeight()}))
+                        settingsPanel.ScrollTo(sections[i]);
+                    // How many settings here differ from the default.
+                    if (const int changed = settingsPanel.ChangedCount(sections[i]); changed > 0)
+                    {
+                        const std::string n = "\xe2\x97\x8f " + std::to_string(changed);
+                        const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
+                        const ImVec2 ts = ImGui::CalcTextSize(n.c_str());
+                        const float fs = ImGui::GetFontSize() * 0.82f, k = fs / ImGui::GetFontSize();
+                        ImGui::GetWindowDrawList()->AddText(ImGui::GetFont(), fs,
+                                                            {b.x - ts.x * k - 8.0f, (a.y + b.y - ts.y * k) * 0.5f},
+                                                            IM_COL32(0xe8, 0x95, 0x7a, 255), n.c_str());
+                        ImGui::SetItemTooltip("Не по умолчанию: %d", changed);
+                    }
+                }
+                break;
             }
-            ImGui::EndTabBar();
+            }
+            ImGui::EndChild();
+            {
+                const ImVec2 r = ImGui::GetItemRectMax();
+                rootDl->AddLine({r.x - 0.5f, 0}, {r.x - 0.5f, r.y}, kLine);
+            }
+            ImGui::SameLine(0, 0);
         }
-        ImGui::EndChild();
 
-        ImGui::SameLine();
-        ImGui::BeginChild("##sessions_pane", {0, 0}, ImGuiChildFlags_Borders);
-        tabs.Draw();
-        ImGui::EndChild();
+        // ── Main area: session tabs, or the settings ─────────────────────
+        if (section == ui::Section::Stats)
+        {
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {28.0f * xscale, 20.0f * xscale});
+            ImGui::BeginChild("##stats_pane", {0, 0}, ImGuiChildFlags_AlwaysUseWindowPadding);
+            ImGui::PopStyleVar();
+            transcripts.Refresh();
+            statsView.Draw(usageMonitor.Account(), usageRows, usageMonitor, transcripts, modelCatalog);
+            ImGui::EndChild();
+        }
+        else if (section == ui::Section::Settings)
+        {
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {28.0f * xscale, 20.0f * xscale});
+            ImGui::BeginChild("##settings_pane", {0, 0}, ImGuiChildFlags_AlwaysUseWindowPadding);
+            ImGui::PopStyleVar();
+            settingsPanel.Draw();
+            ImGui::EndChild();
+        }
+        else
+        {
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {10.0f * xscale, 8.0f * xscale});
+            ImGui::BeginChild("##sessions_pane", {0, 0}, ImGuiChildFlags_AlwaysUseWindowPadding);
+            ImGui::PopStyleVar();
+            tabs.Draw();
+            ImGui::EndChild();
+        }
 
         ImGui::End();
 
@@ -609,9 +752,13 @@ int main(int argc, char** argv)
 
         if (now < vpnAlertUntil) ui::DrawToast(vpnAlertText.c_str(), IM_COL32(0xd9, 0x5f, 0x57, 0xff));
 
-        terminalHadFocus = tabs.AnyTerminalFocused() && !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId);
+        terminalHadFocus = section != ui::Section::Settings && tabs.AnyTerminalFocused() &&
+                           !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId);
 
         std::string title = "ClaudeUI";
+#ifdef CLAUDEUI_DEBUG
+        if (std::getenv("CLAUDEUI_TEST_INPUT")) title += " [test]"; // tells scripted test windows apart from real ones
+#endif
         if (int n = tabs.RunningCount(); n > 0) title += " — " + std::to_string(n) + " активн.";
         if (title != windowTitle)
         {

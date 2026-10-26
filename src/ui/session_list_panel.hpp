@@ -28,6 +28,7 @@ public:
         std::function<void(const std::string& cwd)>       newInDir;   // new session dialog, prefilled
         std::function<void(const std::string& cwd)>       continueIn; // claude --continue in that dir
         std::function<void()>                             rescan;
+        std::function<void()>                             newSession; // the big "Новая сессия" button
     };
 
     void SetCallbacks(Callbacks cb) { cb_ = std::move(cb); }

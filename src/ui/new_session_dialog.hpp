@@ -39,7 +39,13 @@ private:
     std::string model_;
     std::string prompt_;
     bool        continueLast_ = false;
-    std::vector<std::string> recent_;
+    struct RecentProject
+    {
+        std::string path;
+        int         sessions = 0;
+        std::string lastActive; // ISO timestamp of the newest session there
+    };
+    std::vector<RecentProject> recent_;
     std::shared_ptr<PickerState> picker_;
 };
 } // namespace ui

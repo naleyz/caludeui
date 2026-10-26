@@ -34,12 +34,32 @@ struct TerminalFont
     bool operator==(const TerminalFont&) const = default;
 };
 
+// Which proxy the `claude` sessions ClaudeUI starts use; see net::SessionProxy.
+// `url`/`noProxy` are kept while another mode is picked, so switching back
+// doesn't lose them.
+struct ProxySetting
+{
+    enum class Mode
+    {
+        System, // inherit ClaudeUI's environment (https_proxy, all_proxy, …)
+        Custom, // `url` for every proxy variable, ignoring the environment
+        None,   // every proxy variable removed
+    };
+    static constexpr const char* kDefaultNoProxy = "localhost,127.0.0.1,::1";
+
+    Mode        mode = Mode::System;
+    std::string url;
+    std::string noProxy = kDefaultNoProxy;
+    bool operator==(const ProxySetting&) const = default;
+};
+
 // ClaudeUI's own preferences — never written into Claude Code's files.
 struct AppSettings
 {
     bool         showLegacyModels = false; // offer the Claude 3.x generation in model pickers
     bool         usageAutoRefresh = true;  // keep the limits panel current by running `claude -p /usage`
     TerminalFont terminalFont;
+    ProxySetting sessionProxy;
     // Display order + visibility of the sidebar's stacked panels.
     std::vector<PanelConfig> sidebarPanels = {{"sessions", true}, {"usage", true}};
 };
@@ -58,6 +78,7 @@ public:
     bool SetShowLegacyModels(bool value, std::string* error);
     bool SetUsageAutoRefresh(bool value, std::string* error);
     bool SetTerminalFont(const TerminalFont& value, std::string* error);
+    bool SetSessionProxy(const ProxySetting& value, std::string* error);
     bool SetSidebarPanels(const std::vector<PanelConfig>& value, std::string* error);
 
     // Bumped on every successful change, so the UI can tell when to re-apply.

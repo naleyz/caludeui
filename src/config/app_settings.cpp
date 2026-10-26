@@ -13,6 +13,17 @@ constexpr const char* kShowLegacyModels = "showLegacyModels";
 constexpr const char* kUsageAutoRefresh = "usageAutoRefresh";
 constexpr const char* kTerminalFont     = "terminalFont";
 constexpr const char* kSidebarPanels    = "sidebarPanels";
+constexpr const char* kSessionProxy     = "sessionProxy";
+
+const char* ModeName(ProxySetting::Mode m)
+{
+    switch (m)
+    {
+    case ProxySetting::Mode::Custom: return "custom";
+    case ProxySetting::Mode::None:   return "none";
+    default:                         return "system";
+    }
+}
 
 // Drops ids the file has but this version doesn't know, and appends any
 // known id the file is missing (visible) — see PanelConfig's doc comment.
@@ -56,6 +67,14 @@ AppSettingsStore::AppSettingsStore() : path_(AppSettingsPath())
             str("bold", f.boldPath);
             if (auto v = it->find("size"); v != it->end() && v->is_number())
                 f.size = std::clamp(v->get<float>(), TerminalFont::kMinSize, TerminalFont::kMaxSize);
+        }
+        if (auto it = j->find(kSessionProxy); it != j->end() && it->is_object())
+        {
+            ProxySetting& p = settings_.sessionProxy;
+            const std::string mode = it->value("mode", "system");
+            p.mode    = mode == "custom" ? ProxySetting::Mode::Custom : mode == "none" ? ProxySetting::Mode::None : ProxySetting::Mode::System;
+            p.url     = it->value("url", "");
+            p.noProxy = it->value("noProxy", ProxySetting::kDefaultNoProxy);
         }
         if (auto it = j->find(kSidebarPanels); it != j->end() && it->is_array())
         {
@@ -118,6 +137,26 @@ bool AppSettingsStore::SetTerminalFont(const TerminalFont& value, std::string* e
     if (ok)
     {
         settings_.terminalFont = v;
+        loadError_.clear();
+        ++revision_;
+    }
+    return ok;
+}
+
+bool AppSettingsStore::SetSessionProxy(const ProxySetting& value, std::string* error)
+{
+    error->clear();
+    const bool ok = UpdateJsonFile(
+        path_,
+        [&](Json& root) {
+            if (value == ProxySetting{}) root.erase(kSessionProxy); // all defaults: leave no trace in the file
+            else root[kSessionProxy] = Json{{"mode", ModeName(value.mode)}, {"url", value.url}, {"noProxy", value.noProxy}};
+            return true;
+        },
+        error, /*backup=*/false);
+    if (ok)
+    {
+        settings_.sessionProxy = value;
         loadError_.clear();
         ++revision_;
     }

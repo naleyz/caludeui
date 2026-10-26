@@ -2,6 +2,8 @@
 
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 namespace net
 {
@@ -27,8 +29,46 @@ struct Route
     std::string Signature() const;
 };
 
-// Looks at the environment this process — and so the `claude` it spawns —
-// runs in. Cheap (a few file reads and one `ip route get`), safe on the UI thread.
+// Which proxy the `claude` processes ClaudeUI starts should use (Settings →
+// ClaudeUI). System: whatever ClaudeUI's own environment has (https_proxy,
+// all_proxy, …). Custom: `url` for every proxy variable, `noProxy` as NO_PROXY,
+// whatever the environment says. None: every proxy variable removed.
+enum class ProxyMode
+{
+    System,
+    Custom,
+    None,
+};
+struct SessionProxy
+{
+    ProxyMode   mode = ProxyMode::System;
+    std::string url;     // Custom: "http://127.0.0.1:10809"
+    std::string noProxy; // Custom: NO_PROXY for the session ("" = none)
+    bool operator==(const SessionProxy&) const = default;
+};
+// Thread-safe; set by the UI whenever the setting changes.
+void SetSessionProxy(SessionProxy proxy);
+SessionProxy GetSessionProxy();
+
+// The environment changes that apply GetSessionProxy() to a child process:
+// variables to drop, then variables to set (empty for System).
+struct ProxyEnv
+{
+    std::vector<std::string>                         unset;
+    std::vector<std::pair<std::string, std::string>> set;
+};
+ProxyEnv SessionProxyEnv();
+
+// Every variable that steers a proxy for Claude Code or the tools it runs.
+inline const std::vector<std::string> kProxyVars = {"https_proxy", "HTTPS_PROXY", "http_proxy", "HTTP_PROXY",
+                                                    "all_proxy",   "ALL_PROXY",   "no_proxy",   "NO_PROXY"};
+
+// "" when `url` is usable as an HTTP(S) proxy for Claude Code, else why not.
+std::string CheckProxyUrl(std::string_view url);
+
+// The route the `claude` ClaudeUI spawns will take: the session proxy setting
+// over ClaudeUI's own environment. Cheap (a few file reads and one
+// `ip route get`), safe on the UI thread.
 Route DetectRoute();
 
 // Same detection with the inputs passed in, for tests and probes.

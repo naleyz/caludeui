@@ -9,6 +9,8 @@
 #include <imgui_internal.h> // MenuItemEx
 #include <misc/cpp/imgui_stdlib.h> // InputTextWithHint(..., std::string*)
 
+#include <cfloat>
+#include <filesystem>
 #include <unordered_map>
 
 namespace ui
@@ -98,41 +100,70 @@ void SessionListPanel::Draw(const std::vector<sessions::SessionInfo>& sessions,
                             const sessions::LiveSessionRegistry& live,
                             const std::unordered_set<std::string>& openInTabs)
 {
-    // ── Header ─────────────────────────────────────────────────────────
-    int liveElsewhere = 0;
-    for (const auto& l : live.All())
-        if (!openInTabs.contains(l.sessionId)) ++liveElsewhere;
+    const auto& style = ImGui::GetStyle();
+    const float fs    = ImGui::GetFontSize();
 
-    ImGui::TextColored(theme::palette::MidGray, "%zu сессий", sessions.size());
-    if (!openInTabs.empty())
+    // ── Title ──────────────────────────────────────────────────────────
     {
-        ImGui::SameLine();
-        ImGui::TextColored(theme::palette::Green, "· %zu здесь", openInTabs.size());
-    }
-    if (liveElsewhere > 0)
-    {
-        ImGui::SameLine();
-        ImGui::TextColored(theme::palette::Blue, "· %d в других терминалах", liveElsewhere);
-        ImGui::SetItemTooltip("Процессы Claude Code, запущенные не из ClaudeUI (по ~/.claude/sessions)");
-    }
-    const char* refresh = icons::Label(icons::Icon::Retry, "Обновить");
-    ImGui::SameLine(std::max(ImGui::GetCursorPosX(), ImGui::GetContentRegionMax().x - ImGui::CalcTextSize(refresh).x -
-                                                        ImGui::GetStyle().FramePadding.x * 2));
-    if (ImGui::SmallButton(refresh) && cb_.rescan) cb_.rescan();
+        int liveElsewhere = 0;
+        for (const auto& l : live.All())
+            if (!openInTabs.contains(l.sessionId)) ++liveElsewhere;
 
-    ImGui::SetNextItemWidth(-ImGui::CalcTextSize("Только активные").x - ImGui::GetFrameHeight() -
-                            ImGui::GetStyle().ItemSpacing.x * 2);
+        ImGui::PushFont(nullptr, fs * 1.3f);
+        ImGui::TextUnformatted("Сессии");
+        ImGui::PopFont();
+        std::string meta = std::to_string(openInTabs.size()) + " активны";
+        if (liveElsewhere > 0) meta += " · " + std::to_string(liveElsewhere) + " снаружи";
+        ImGui::SameLine(std::max(ImGui::GetCursorPosX(), ImGui::GetContentRegionMax().x - ImGui::CalcTextSize(meta.c_str()).x));
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextColored(theme::palette::MidGray, "%s", meta.c_str());
+        if (liveElsewhere > 0)
+            ImGui::SetItemTooltip("%zu открыто в ClaudeUI, %d — в других терминалах (по ~/.claude/sessions)",
+                                  openInTabs.size(), liveElsewhere);
+    }
+
+    // ── New session ────────────────────────────────────────────────────
+    ImGui::Dummy({0, 2});
+    ImGui::PushStyleColor(ImGuiCol_Button, theme::palette::Orange);
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4{0.89f, 0.55f, 0.43f, 1.0f});
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4{0.76f, 0.40f, 0.29f, 1.0f});
+    ImGui::PushStyleColor(ImGuiCol_Text, theme::palette::Dark);
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 8.0f);
+    if (ImGui::Button(icons::Label(icons::Icon::NewChat, "Новая сессия"), {-FLT_MIN, ImGui::GetFrameHeight() * 1.55f}) &&
+        cb_.newSession)
+        cb_.newSession();
+    ImGui::PopStyleVar();
+    ImGui::PopStyleColor(4);
+    ImGui::SetItemTooltip("Ctrl+Shift+T");
+
+    // ── Search · only-live · rescan ────────────────────────────────────
+    ImGui::Dummy({0, 2});
+    const char* liveGlyph  = "\xe2\x97\x8f"; // ●
+    const char* rescanGlyph = icons::Glyph(icons::Icon::Retry);
+    const float btnW = [&](const char* t) { return ImGui::CalcTextSize(t).x + style.FramePadding.x * 2; }(liveGlyph) +
+                       ImGui::CalcTextSize(rescanGlyph).x + style.FramePadding.x * 2 + style.ItemSpacing.x * 2;
+    ImGui::SetNextItemWidth(-btnW);
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 8.0f);
     filter_.Draw("##search", 0.0f);
     if (!filter_.IsActive() && !ImGui::IsItemActive())
     {
         ImVec2 r = ImGui::GetItemRectMin();
-        ImGui::GetWindowDrawList()->AddText({r.x + ImGui::GetStyle().FramePadding.x, r.y + ImGui::GetStyle().FramePadding.y},
+        ImGui::GetWindowDrawList()->AddText({r.x + style.FramePadding.x, r.y + style.FramePadding.y},
                                             Col(theme::palette::MidGray, 0.7f),
-                                            icons::Label(icons::Icon::Search, "Поиск: название, текст, папка, id"));
+                                            icons::Label(icons::Icon::Search, "Поиск по сессиям"));
     }
     ImGui::SameLine();
-    ImGui::Checkbox("Только активные", &onlyLive_);
-    ImGui::Separator();
+    ImGui::PushStyleColor(ImGuiCol_Text, onlyLive_ ? theme::palette::Green : theme::palette::MidGray);
+    if (ImGui::Button("\xe2\x97\x8f##only_live")) onlyLive_ = !onlyLive_;
+    ImGui::PopStyleColor();
+    ImGui::SetItemTooltip(onlyLive_ ? "Показаны только запущенные — показать все" : "Показать только запущенные");
+    ImGui::SameLine();
+    ImGui::PushID("rescan");
+    if (ImGui::Button(rescanGlyph) && cb_.rescan) cb_.rescan();
+    ImGui::PopID();
+    ImGui::SetItemTooltip("Перечитать ~/.claude/projects (%zu сессий)", sessions.size());
+    ImGui::PopStyleVar();
+    ImGui::Dummy({0, 2});
 
     // ── List ───────────────────────────────────────────────────────────
     auto passes = [&](const Group& g, const sessions::SessionInfo& s) {
@@ -144,10 +175,14 @@ void SessionListPanel::Draw(const std::vector<sessions::SessionInfo>& sessions,
     };
 
     ImGui::BeginChild("##session_list", {0, 0});
-    if (sessions.empty())
-    {
-        ImGui::TextColored(theme::palette::MidGray, "В ~/.claude/projects пока нет сессий.");
-    }
+    if (sessions.empty()) ImGui::TextColored(theme::palette::MidGray, "В ~/.claude/projects пока нет сессий.");
+
+    ImDrawList* dl       = ImGui::GetWindowDrawList();
+    const float small    = fs * 0.9f;
+    const float rowH     = fs + small + style.FramePadding.y * 2 + 6.0f;
+    const ImU32 primary  = Col(theme::palette::Light);
+    const ImU32 muted    = Col(theme::palette::MidGray);
+    const ImU32 faint    = IM_COL32(0x8f, 0x8d, 0x85, 255);
 
     for (const auto& group : GroupByProject(sessions))
     {
@@ -156,9 +191,19 @@ void SessionListPanel::Draw(const std::vector<sessions::SessionInfo>& sessions,
         if (visible == 0) continue;
 
         ImGui::PushID(group.cwd.c_str());
-        std::string header = TildePath(group.cwd) + "  (" + std::to_string(visible) + ")###group";
-        const bool open = ImGui::CollapsingHeader(header.c_str(), ImGuiTreeNodeFlags_DefaultOpen |
-                                                                      ImGuiTreeNodeFlags_AllowOverlap);
+
+        // Group header: project folder name, muted; the full path in the tooltip.
+        std::string name = std::filesystem::path(group.cwd).filename().string();
+        if (name.empty()) name = TildePath(group.cwd);
+        ImGui::Dummy({0, 4});
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4{0.56f, 0.55f, 0.52f, 1.0f});
+        ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4{0, 0, 0, 0});
+        ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4{0, 0, 0, 0});
+        const std::string header = name + "  " + std::to_string(visible) + "###group";
+        const bool open = ImGui::TreeNodeEx(header.c_str(), ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_NoTreePushOnOpen |
+                                                                ImGuiTreeNodeFlags_SpanAvailWidth | ImGuiTreeNodeFlags_AllowOverlap);
+        ImGui::PopStyleColor(3);
+        ImGui::SetItemTooltip("%s", TildePath(group.cwd).c_str());
         if (ImGui::BeginPopupContextItem("##group_ctx"))
         {
             if (ImGui::MenuItemEx("Новая сессия в этой папке…", icons::MenuGlyph(icons::Icon::NewChat)) && cb_.newInDir) cb_.newInDir(group.cwd);
@@ -169,118 +214,138 @@ void SessionListPanel::Draw(const std::vector<sessions::SessionInfo>& sessions,
             ImGui::EndPopup();
         }
         // "+" on the header's right edge.
-        ImGui::SameLine(ImGui::GetContentRegionMax().x - ImGui::CalcTextSize(icons::Glyph(icons::Icon::NewChat)).x -
-                        ImGui::GetStyle().FramePadding.x * 2);
-        if (ImGui::SmallButton(icons::Glyph(icons::Icon::NewChat)) && cb_.newInDir) cb_.newInDir(group.cwd);
+        const char* plus = icons::Glyph(icons::Icon::NewChat);
+        ImGui::SameLine(ImGui::GetContentRegionMax().x - ImGui::CalcTextSize(plus).x - style.FramePadding.x * 2);
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4{0, 0, 0, 0});
+        ImGui::PushStyleColor(ImGuiCol_Text, theme::palette::MidGray);
+        if (ImGui::SmallButton(plus) && cb_.newInDir) cb_.newInDir(group.cwd);
+        ImGui::PopStyleColor(2);
         ImGui::SetItemTooltip("Новая сессия в %s", TildePath(group.cwd).c_str());
 
         if (open)
         {
-            const ImGuiTableFlags tflags = ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp |
-                                           ImGuiTableFlags_PadOuterX;
-            if (ImGui::BeginTable("##sessions", 3, tflags))
+            for (const auto* s : group.items)
             {
-                ImGui::TableSetupColumn("##when", ImGuiTableColumnFlags_WidthFixed, ImGui::CalcTextSize("00 мая 00:00").x);
-                ImGui::TableSetupColumn("##name", ImGuiTableColumnFlags_WidthStretch);
-                ImGui::TableSetupColumn("##size", ImGuiTableColumnFlags_WidthFixed, ImGui::CalcTextSize("000.0 МБ").x);
+                if (!passes(group, *s)) continue;
+                ImGui::PushID(s->id.c_str());
 
-                for (const auto* s : group.items)
+                const bool here     = openInTabs.contains(s->id);
+                const auto* running = live.FindBySession(s->id);
+                const bool selected = selectedId_ == s->id;
+
+                const ImVec2 p = ImGui::GetCursorScreenPos();
+                const float  w = ImGui::GetContentRegionAvail().x;
+                ImGui::PushStyleVar(ImGuiStyleVar_SelectableTextAlign, {0, 0});
+                if (ImGui::Selectable("##row", selected,
+                                      ImGuiSelectableFlags_AllowOverlap | ImGuiSelectableFlags_AllowDoubleClick, {w, rowH}))
                 {
-                    if (!passes(group, *s)) continue;
-                    ImGui::PushID(s->id.c_str());
-                    ImGui::TableNextRow();
-
-                    const bool here = openInTabs.contains(s->id);
-                    const auto* running = live.FindBySession(s->id);
-
-                    ImGui::TableSetColumnIndex(0);
-                    const bool selected = selectedId_ == s->id;
-                    if (ImGui::Selectable("##row", selected,
-                                          ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowOverlap |
-                                              ImGuiSelectableFlags_AllowDoubleClick))
-                    {
-                        selectedId_ = s->id;
-                        if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) RequestOpen(*s, live, openInTabs);
-                    }
-                    if (selected && ImGui::IsItemFocused() &&
-                        (ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter)))
-                        RequestOpen(*s, live, openInTabs);
-
-                    if (ImGui::BeginPopupContextItem("##row_ctx"))
-                    {
-                        selectedId_ = s->id;
-                        if (ImGui::MenuItemEx(here ? "Перейти к вкладке" : "Открыть", icons::MenuGlyph(icons::Icon::Sessions)))
-                            RequestOpen(*s, live, openInTabs);
-                        if (ImGui::MenuItemEx("Копировать ID", icons::MenuGlyph(icons::Icon::Copy))) ImGui::SetClipboardText(s->id.c_str());
-                        if (ImGui::MenuItemEx("Копировать команду resume", icons::MenuGlyph(icons::Icon::Copy)))
-                        {
-                            LaunchSpec spec;
-                            spec.cwd = s->cwd.empty() ? s->projectDir : std::filesystem::path(s->cwd);
-                            spec.resumeId = s->id;
-                            ImGui::SetClipboardText(spec.CommandLine().c_str());
-                        }
-                        ImGui::Separator();
-                        if (ImGui::MenuItemEx("Новая сессия в этой папке…", icons::MenuGlyph(icons::Icon::NewChat)) && cb_.newInDir)
-                            cb_.newInDir(group.cwd);
-                        if (ImGui::MenuItemEx("Открыть папку проекта", icons::MenuGlyph(icons::Icon::Folder))) OpenWithDesktop(group.cwd);
-                        if (ImGui::MenuItemEx("Показать транскрипт (.jsonl)", icons::MenuGlyph(icons::Icon::Folder)))
-                            OpenWithDesktop(s->filePath.parent_path());
-                        ImGui::Separator();
-                        if (ImGui::MenuItemEx("Переименовать…", nullptr))
-                        {
-                            renameTarget_ = *s;
-                            renameBuffer_ = s->DisplayName();
-                            renameError_.clear();
-                            renameOpen_ = true;
-                        }
-                        const bool active = here || running;
-                        ImGui::BeginDisabled(active);
-                        if (ImGui::MenuItemEx("Удалить сессию…", nullptr))
-                        {
-                            deleteTarget_ = *s;
-                            deleteError_.clear();
-                            deleteOpen_ = true;
-                        }
-                        ImGui::EndDisabled();
-                        if (active) ImGui::SetItemTooltip("Нельзя удалить активную сессию — сначала закройте её (/exit)");
-                        ImGui::EndPopup();
-                    }
-                    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal))
-                    {
-                        ImGui::BeginTooltip();
-                        ImGui::PushTextWrapPos(ImGui::GetFontSize() * 36.0f);
-                        if (!s->title.empty()) ImGui::TextUnformatted(s->title.c_str());
-                        if (!s->firstUserPreview.empty())
-                            ImGui::TextColored(theme::palette::MidGray, "Первый запрос: %s", s->firstUserPreview.c_str());
-                        if (!s->lastPrompt.empty() && s->lastPrompt != s->firstUserPreview)
-                            ImGui::TextColored(theme::palette::MidGray, "Последний: %s", s->lastPrompt.c_str());
-                        ImGui::PopTextWrapPos();
-                        ImGui::Separator();
-                        ImGui::TextColored(theme::palette::MidGray, "%s", s->id.c_str());
-                        ImGui::TextColored(theme::palette::MidGray, "Начата %s, активность %s",
-                                           HumanTime(s->firstTimestamp).c_str(), HumanTime(s->lastTimestamp).c_str());
-                        if (running)
-                            ImGui::TextColored(theme::palette::Blue, "Запущена: pid %d, %s", running->pid,
-                                               LiveStatusText(running->status));
-                        ImGui::TextColored(theme::palette::MidGray, "Двойной клик или Enter — открыть");
-                        ImGui::EndTooltip();
-                    }
-
-                    ImGui::SameLine(0, 0);
-                    ImGui::TextColored(theme::palette::MidGray, "%s", HumanTime(s->lastTimestamp).c_str());
-
-                    ImGui::TableSetColumnIndex(1);
-                    if (here) StatusDot(Col(theme::palette::Green));
-                    else if (running) StatusDot(Col(theme::palette::Blue));
-                    const std::string& name = s->DisplayName();
-                    if (name.empty()) ImGui::TextColored(theme::palette::MidGray, "(без сообщений)");
-                    else ImGui::TextUnformatted(name.c_str());
-
-                    ImGui::TableSetColumnIndex(2);
-                    ImGui::TextColored(theme::palette::MidGray, "%s", HumanSize(s->fileSizeBytes).c_str());
-                    ImGui::PopID();
+                    selectedId_ = s->id;
+                    if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) RequestOpen(*s, live, openInTabs);
                 }
-                ImGui::EndTable();
+                ImGui::PopStyleVar();
+                if (selected && ImGui::IsItemFocused() &&
+                    (ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter)))
+                    RequestOpen(*s, live, openInTabs);
+
+                if (ImGui::BeginPopupContextItem("##row_ctx"))
+                {
+                    selectedId_ = s->id;
+                    if (ImGui::MenuItemEx(here ? "Перейти к вкладке" : "Открыть", icons::MenuGlyph(icons::Icon::Sessions)))
+                        RequestOpen(*s, live, openInTabs);
+                    if (ImGui::MenuItemEx("Копировать ID", icons::MenuGlyph(icons::Icon::Copy))) ImGui::SetClipboardText(s->id.c_str());
+                    if (ImGui::MenuItemEx("Копировать команду resume", icons::MenuGlyph(icons::Icon::Copy)))
+                    {
+                        LaunchSpec spec;
+                        spec.cwd = s->cwd.empty() ? s->projectDir : std::filesystem::path(s->cwd);
+                        spec.resumeId = s->id;
+                        ImGui::SetClipboardText(spec.CommandLine().c_str());
+                    }
+                    ImGui::Separator();
+                    if (ImGui::MenuItemEx("Новая сессия в этой папке…", icons::MenuGlyph(icons::Icon::NewChat)) && cb_.newInDir)
+                        cb_.newInDir(group.cwd);
+                    if (ImGui::MenuItemEx("Открыть папку проекта", icons::MenuGlyph(icons::Icon::Folder))) OpenWithDesktop(group.cwd);
+                    if (ImGui::MenuItemEx("Показать транскрипт (.jsonl)", icons::MenuGlyph(icons::Icon::Folder)))
+                        OpenWithDesktop(s->filePath.parent_path());
+                    ImGui::Separator();
+                    if (ImGui::MenuItemEx("Переименовать…", nullptr))
+                    {
+                        renameTarget_ = *s;
+                        renameBuffer_ = s->DisplayName();
+                        renameError_.clear();
+                        renameOpen_ = true;
+                    }
+                    const bool active = here || running;
+                    ImGui::BeginDisabled(active);
+                    if (ImGui::MenuItemEx("Удалить сессию…", nullptr))
+                    {
+                        deleteTarget_ = *s;
+                        deleteError_.clear();
+                        deleteOpen_ = true;
+                    }
+                    ImGui::EndDisabled();
+                    if (active) ImGui::SetItemTooltip("Нельзя удалить активную сессию — сначала закройте её (/exit)");
+                    ImGui::EndPopup();
+                }
+                if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal))
+                {
+                    ImGui::BeginTooltip();
+                    ImGui::PushTextWrapPos(ImGui::GetFontSize() * 36.0f);
+                    if (!s->title.empty()) ImGui::TextUnformatted(s->title.c_str());
+                    if (!s->firstUserPreview.empty())
+                        ImGui::TextColored(theme::palette::MidGray, "Первый запрос: %s", s->firstUserPreview.c_str());
+                    if (!s->lastPrompt.empty() && s->lastPrompt != s->firstUserPreview)
+                        ImGui::TextColored(theme::palette::MidGray, "Последний: %s", s->lastPrompt.c_str());
+                    ImGui::PopTextWrapPos();
+                    ImGui::Separator();
+                    ImGui::TextColored(theme::palette::MidGray, "%s", s->id.c_str());
+                    ImGui::TextColored(theme::palette::MidGray, "Начата %s, активность %s · %s",
+                                       HumanTime(s->firstTimestamp).c_str(), HumanTime(s->lastTimestamp).c_str(),
+                                       HumanSize(s->fileSizeBytes).c_str());
+                    if (running)
+                        ImGui::TextColored(theme::palette::Blue, "Запущена: pid %d, %s", running->pid,
+                                           LiveStatusText(running->status));
+                    ImGui::TextColored(theme::palette::MidGray, "Двойной клик или Enter — открыть");
+                    ImGui::EndTooltip();
+                }
+
+                // Status dot: colour = what the session is doing; hollow = not running.
+                const float padX = style.FramePadding.x + 2.0f, padY = style.FramePadding.y + 2.0f;
+                const float r    = fs * 0.25f;
+                const ImVec2 dc{p.x + padX + r, p.y + padY + fs * 0.5f};
+                std::string meta;
+                if (running)
+                {
+                    ImU32 c = Col(theme::palette::Green);
+                    if (here)
+                    {
+                        if (running->status == "busy") c = Col(theme::palette::Orange);
+                        else if (running->status == "waiting") c = Col(theme::palette::Blue);
+                        else c = Col(theme::palette::LightGray);
+                        meta = std::string(LiveStatusText(running->status)) + " · открыта здесь";
+                    }
+                    else meta = "в другом терминале · pid " + std::to_string(running->pid);
+                    dl->AddCircleFilled(dc, r, c);
+                }
+                else
+                {
+                    if (here) meta = "открыта здесь";
+                    else meta = HumanSize(s->fileSizeBytes);
+                    dl->AddCircle(dc, r - 0.5f, IM_COL32(0x6b, 0x6a, 0x64, 255), 0, 1.5f);
+                }
+
+                const std::string when = HumanTime(s->lastTimestamp);
+                const ImVec2 ws  = ImGui::CalcTextSize(when.c_str());
+                const float  tx  = dc.x + r + 10.0f;
+                const float  wx  = p.x + w - padX - ws.x * 0.9f;
+                ImGui::PushClipRect({tx, p.y}, {wx - 8.0f, p.y + rowH}, true);
+                const std::string& title = s->DisplayName();
+                dl->AddText(ImGui::GetFont(), fs, {tx, p.y + padY}, title.empty() ? muted : primary,
+                            title.empty() ? "(без сообщений)" : title.c_str());
+                dl->AddText(ImGui::GetFont(), small, {tx, p.y + padY + fs + 2.0f}, running || here ? muted : faint, meta.c_str());
+                ImGui::PopClipRect();
+                dl->AddText(ImGui::GetFont(), small, {wx, p.y + padY + (fs - small) * 0.5f}, faint, when.c_str());
+
+                ImGui::PopID();
             }
         }
         ImGui::PopID();

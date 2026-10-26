@@ -227,6 +227,10 @@ bool TerminalPanel::Spawn()
     const auto extras = usage::Global().ForLaunch(uid_, spec_.cwd);
     opts.argv.insert(opts.argv.begin() + 1, extras.args.begin(), extras.args.end());
     opts.setEnv = extras.env;
+    // The proxy chosen in Settings → ClaudeUI, over whatever ClaudeUI inherited.
+    const net::ProxyEnv proxy = net::SessionProxyEnv();
+    opts.unsetEnv.insert(opts.unsetEnv.end(), proxy.unset.begin(), proxy.unset.end());
+    opts.setEnv.insert(opts.setEnv.end(), proxy.set.begin(), proxy.set.end());
 
     if (!term_.start(opts, &error_))
     {
@@ -563,7 +567,44 @@ ImU32 TerminalPanel::StatusColor() const
 }
 
 // ── drawing ─────────────────────────────────────────────────────────────
-// "VPN · FR" next to the status once the exit check has run over a VPN; what
+namespace
+{
+struct ChipStyle
+{
+    ImU32 bg, fg;
+};
+constexpr ChipStyle kChipNeutral{IM_COL32(0x23, 0x23, 0x21, 255), IM_COL32(0xb0, 0xae, 0xa5, 255)};
+constexpr ChipStyle kChipBlue{IM_COL32(0x1e, 0x2a, 0x36, 255), IM_COL32(0x9c, 0xc0, 0xe4, 255)};
+constexpr ChipStyle kChipOrange{IM_COL32(0x3a, 0x2a, 0x22, 255), IM_COL32(0xe8, 0x95, 0x7a, 255)};
+constexpr ChipStyle kChipGreen{IM_COL32(0x23, 0x25, 0x1c, 255), IM_COL32(0xa9, 0xbb, 0x8d, 255)};
+constexpr ChipStyle kChipRed{IM_COL32(0x3c, 0x1e, 0x1c, 255), IM_COL32(0xec, 0x7e, 0x7e, 255)};
+
+float ChipWidth(const char* text, bool dot)
+{
+    const float h = ImGui::GetFrameHeight() * 0.85f;
+    return ImGui::CalcTextSize(text).x + h * 0.9f + (dot ? h * 0.45f : 0.0f);
+}
+
+// A pill-shaped label at the cursor; an item, so tooltips can hang off it.
+// `dot`: 0 none, else the dot's colour; `spin` draws a spinner in its place.
+void Chip(const char* id, const char* text, ChipStyle st, ImU32 dot = 0, bool spin = false)
+{
+    const float h = ImGui::GetFrameHeight() * 0.85f;
+    const float w = ChipWidth(text, dot != 0 || spin);
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    ImGui::InvisibleButton(id, {w, h});
+    auto* dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(p, {p.x + w, p.y + h}, st.bg, h * 0.5f);
+    float tx = p.x + h * 0.45f;
+    if (spin) SpinnerAt(dl, {tx + h * 0.15f, p.y + h * 0.5f}, dot ? dot : st.fg, h * 0.2f, 1.5f);
+    else if (dot) dl->AddCircleFilled({tx + h * 0.12f, p.y + h * 0.5f}, h * 0.13f, dot);
+    if (dot || spin) tx += h * 0.45f;
+    const ImVec2 ts = ImGui::CalcTextSize(text);
+    dl->AddText({tx, p.y + (h - ts.y) * 0.5f}, st.fg, text);
+}
+} // namespace
+
+// VPN chip next to the status once the exit check has run over a VPN; what
 // the check saw is in the tooltip. Not shown without a VPN, where nothing is checked.
 // While running, this reflects the periodic re-check (PollVpnRecheck), not
 // just the launch-time result, so a VPN that drops to RU mid-session turns
@@ -571,17 +612,27 @@ ImU32 TerminalPanel::StatusColor() const
 void TerminalPanel::DrawVpnChip()
 {
     using Outcome = net::EgressCheck::Outcome;
-    if (!egressResult_.route.ViaVpn() || status_ == Status::Checking || status_ == Status::NotStarted) return;
+    if (status_ == Status::Checking || status_ == Status::NotStarted) return;
+    if (!egressResult_.route.ViaVpn())
+    {
+        Chip("##vpn", "без VPN", kChipNeutral);
+        if (ImGui::BeginItemTooltip())
+        {
+            ImGui::TextUnformatted("Прямое подключение — страна выхода не проверяется.");
+            ImGui::TextColored(theme::palette::MidGray, "Прокси для сессий: Настройки → ClaudeUI");
+            ImGui::EndTooltip();
+        }
+        ImGui::SameLine();
+        return;
+    }
 
     const bool known = egressResult_.outcome == Outcome::Ok || egressResult_.outcome == Outcome::Russia;
     const bool russiaWhileRunning = egressResult_.outcome == Outcome::Russia && Running();
-    if (russiaWhileRunning)
-        ImGui::TextColored({0.85f, 0.37f, 0.34f, 1.0f}, "VPN · %s", egressResult_.countryCode.c_str());
-    else if (known)
-        ImGui::TextColored(egressResult_.outcome == Outcome::Ok ? theme::palette::Green : theme::palette::Orange,
-                           "VPN · %s", egressResult_.countryCode.c_str());
-    else
-        ImGui::TextColored(theme::palette::Orange, "VPN · не проверен");
+    const std::string text = known ? "VPN · " + egressResult_.countryCode : std::string("VPN · не проверен");
+    const ChipStyle st = russiaWhileRunning                        ? kChipRed
+                         : known && egressResult_.outcome == Outcome::Ok ? kChipGreen
+                                                                         : kChipOrange;
+    Chip("##vpn", text.c_str(), st);
     if (ImGui::BeginItemTooltip())
     {
         ImGui::TextUnformatted(egressResult_.route.Describe().c_str());
@@ -597,42 +648,126 @@ void TerminalPanel::DrawVpnChip()
 
 void TerminalPanel::DrawToolbar()
 {
-    if (status_ == Status::Starting || status_ == Status::Checking) Spinner(StatusColor());
-    else StatusDot(StatusColor());
-    ImGui::TextColored(theme::palette::MidGray, "%s", StatusText().c_str());
-    ImGui::SameLine();
-    DrawVpnChip();
-    if (!exitError_.empty() && Running())
-    {
-        ImGui::TextColored({0.85f, 0.37f, 0.34f, 1.0f}, "/exit отменён");
-        ImGui::SetItemTooltip("%s", exitError_.c_str());
-        ImGui::SameLine();
-    }
-    ImGui::TextUnformatted(title_.c_str());
-    ImGui::SameLine();
-    ImGui::TextColored(theme::palette::MidGray, "%s", TildePath(spec_.cwd.string()).c_str());
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", spec_.CommandLine().c_str());
-
-    // Right-aligned actions.
     const auto& style = ImGui::GetStyle();
+    const float fs    = ImGui::GetFontSize();
     const bool running = Running();
-    const char* primary = running                     ? icons::Label(icons::Icon::Exit, "Закрыть (/exit)")
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    const float  width  = ImGui::GetContentRegionAvail().x;
+    const float  headH  = fs * 1.15f + fs * 0.9f + 6.0f; // title + path lines
+    auto* dl = ImGui::GetWindowDrawList();
+
+    // ── Right: chips and actions, measured first so the title can clip before them ──
+    ChipStyle statusStyle = kChipNeutral;
+    switch (status_)
+    {
+    case Status::Busy:    statusStyle = kChipOrange; break;
+    case Status::Waiting: statusStyle = kChipBlue; break;
+    case Status::Idle:    statusStyle = kChipGreen; break;
+    case Status::Failed:
+    case Status::Blocked: statusStyle = kChipRed; break;
+    default: break;
+    }
+    const std::string status = StatusText();
+    const bool spin = status_ == Status::Starting || status_ == Status::Checking;
+
+    std::string cost, model, effort;
+    if (const auto* u = usage::Global().Session(uid_))
+    {
+        if (u->costUsd > 0.0)
+        {
+            char buf[32];
+            std::snprintf(buf, sizeof(buf), "$%.2f", u->costUsd);
+            cost = buf;
+        }
+        model  = u->model;
+        effort = u->effort;
+    }
+    // Until the session reports its model (status line), show the one it was launched with.
+    if (model.empty() && !spec_.model.empty()) model = spec_.model;
+    std::string modelChip = model;
+    if (!modelChip.empty() && !effort.empty()) modelChip += " · " + effort;
+    const bool vpnShown = status_ != Status::Checking && status_ != Status::NotStarted;
+    const std::string vpnText = !egressResult_.route.ViaVpn() ? "без VPN"
+                                : egressResult_.countryCode.empty() ? "VPN · не проверен"
+                                                                    : "VPN · " + egressResult_.countryCode;
+    const bool exitFailed = !exitError_.empty() && running;
+
+    const char* primary = running                     ? icons::Label(icons::Icon::Exit, "/exit")
                           : status_ == Status::Blocked ? icons::Label(icons::Icon::Retry, "Проверить снова")
                                                        : icons::Label(icons::Icon::Retry, "Перезапустить");
     const char* more = icons::Glyph(icons::Icon::More);
-    float w = ImGui::CalcTextSize(primary).x + ImGui::CalcTextSize("Стоп").x + ImGui::CalcTextSize(more).x +
-              style.FramePadding.x * 6 + style.ItemSpacing.x * 2;
-    ImGui::SameLine(std::max(ImGui::GetCursorPosX(), ImGui::GetWindowContentRegionMax().x - w));
+    const float sp = style.ItemSpacing.x;
+    float right = ChipWidth(status.c_str(), true) + sp;
+    if (!modelChip.empty()) right += ChipWidth(modelChip.c_str(), false) + sp;
+    if (vpnShown) right += ChipWidth(vpnText.c_str(), false) + sp;
+    if (exitFailed) right += ChipWidth("/exit отменён", false) + sp;
+    if (!cost.empty()) right += ChipWidth(cost.c_str(), false) + sp;
+    right += sp + ImGui::CalcTextSize(primary).x + ImGui::CalcTextSize("Стоп").x + ImGui::CalcTextSize(more).x +
+             style.FramePadding.x * 6 + sp * 2;
 
+    // ── Left: title over the folder ─────────────────────────────────────
+    const float leftMax = std::max(origin.x + fs * 6, origin.x + width - right - sp * 2);
+    ImGui::PushClipRect(origin, {leftMax, origin.y + headH}, true);
+    dl->AddText(ImGui::GetFont(), fs * 1.15f, {origin.x + 2, origin.y}, Col(theme::palette::Light), title_.c_str());
+    const std::string path = TildePath(spec_.cwd.string());
+    dl->AddText(ImGui::GetFont(), fs * 0.9f, {origin.x + 2, origin.y + fs * 1.15f + 4.0f}, IM_COL32(0x8f, 0x8d, 0x85, 255),
+                path.c_str());
+    ImGui::PopClipRect();
+    ImGui::SetCursorScreenPos(origin);
+    ImGui::InvisibleButton("##title", {std::max(1.0f, leftMax - origin.x), headH});
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) ImGui::SetTooltip("%s", spec_.CommandLine().c_str());
+
+    // ── Right group, vertically centred on the two lines ───────────────
+    const float chipH = ImGui::GetFrameHeight() * 0.85f;
+    float x = std::max(leftMax + sp, origin.x + width - right);
+    auto at = [&](float h) { ImGui::SetCursorScreenPos({x, origin.y + (headH - h) * 0.5f}); };
+
+    at(chipH);
+    Chip("##status", status.c_str(), statusStyle, statusStyle.fg, spin);
+    if (!waitingFor_.empty() && status_ == Status::Waiting) ImGui::SetItemTooltip("%s", waitingFor_.c_str());
+    x = ImGui::GetItemRectMax().x + sp;
+    if (!modelChip.empty())
+    {
+        at(chipH);
+        Chip("##model", modelChip.c_str(), kChipNeutral);
+        ImGui::SetItemTooltip("Модель сессии%s", effort.empty() ? "" : " и уровень усилий (/effort)");
+        x = ImGui::GetItemRectMax().x + sp;
+    }
+    if (vpnShown)
+    {
+        at(chipH);
+        DrawVpnChip();
+        x = ImGui::GetItemRectMax().x + sp;
+    }
+    if (exitFailed)
+    {
+        at(chipH);
+        Chip("##exit_err", "/exit отменён", kChipRed);
+        ImGui::SetItemTooltip("%s", exitError_.c_str());
+        x = ImGui::GetItemRectMax().x + sp;
+    }
+    if (!cost.empty())
+    {
+        at(chipH);
+        Chip("##cost", cost.c_str(), kChipNeutral);
+        ImGui::SetItemTooltip("Стоимость сессии по прейскуранту API (столько насчитал Claude Code)");
+        x = ImGui::GetItemRectMax().x + sp;
+    }
+    x += sp;
+
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
+    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4{0x3a / 255.0f, 0x39 / 255.0f, 0x35 / 255.0f, 1.0f});
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4{0, 0, 0, 0});
+    at(ImGui::GetFrameHeight());
     if (running)
     {
-        if (ImGui::SmallButton(primary)) RequestExit();
+        if (ImGui::Button(primary)) RequestExit();
         ImGui::SetItemTooltip("Отправить /exit — Claude Code сохранит сессию и завершится сам (Ctrl+Shift+W)");
     }
     else
     {
         ImGui::BeginDisabled(status_ == Status::Checking);
-        if (ImGui::SmallButton(primary)) Restart();
+        if (ImGui::Button(primary)) Restart();
         ImGui::EndDisabled();
         ImGui::SetItemTooltip(status_ == Status::Blocked
                                   ? "Заново определить страну выхода VPN и запустить, если это уже не РФ"
@@ -641,13 +776,15 @@ void TerminalPanel::DrawToolbar()
     }
     ImGui::SameLine();
     ImGui::BeginDisabled(!running);
-    if (ImGui::SmallButton("Стоп")) Stop();
+    if (ImGui::Button("Стоп")) Stop();
     ImGui::SetItemTooltip("Принудительно остановить процесс (SIGTERM)");
     ImGui::EndDisabled();
     ImGui::SameLine();
     ImGui::PushID("session_more"); // the glyph alone isn't a unique ID
-    const bool openMenu = ImGui::SmallButton(more);
+    const bool openMenu = ImGui::Button(more);
     ImGui::PopID();
+    ImGui::PopStyleColor(2);
+    ImGui::PopStyleVar();
     if (openMenu) ImGui::OpenPopup("##session_menu");
     ImGui::SetItemTooltip("Ещё действия");
     if (ImGui::BeginPopup("##session_menu"))
@@ -656,24 +793,24 @@ void TerminalPanel::DrawToolbar()
         ImGui::EndPopup();
     }
 
-    // OSC 9;4 progress as a thin bar under the toolbar.
-    ImVec2 p = ImGui::GetCursorScreenPos();
-    float  width = ImGui::GetContentRegionAvail().x;
+    // Below the header: a hairline, with OSC 9;4 progress drawn over it.
+    ImGui::SetCursorScreenPos({origin.x, origin.y + headH + 8.0f});
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    dl->AddLine({p.x - style.WindowPadding.x, p.y}, {p.x + width + style.WindowPadding.x, p.y}, IM_COL32(0x2b, 0x2a, 0x27, 255));
     if (progress_.state != 0 && running)
     {
-        auto* dl = ImGui::GetWindowDrawList();
         ImU32 c = progress_.state == 2 ? IM_COL32(0xd9, 0x5f, 0x57, 0xff) : Col(theme::palette::Orange);
         if (progress_.state == 3) // indeterminate: a sliding segment
         {
             float t = static_cast<float>(std::fmod(ImGui::GetTime() * 0.6, 1.0));
-            dl->AddRectFilled({p.x + width * t, p.y}, {p.x + width * std::min(1.0f, t + 0.25f), p.y + 2}, c);
+            dl->AddRectFilled({p.x + width * t, p.y - 1}, {p.x + width * std::min(1.0f, t + 0.25f), p.y + 1}, c);
         }
         else
         {
-            dl->AddRectFilled(p, {p.x + width * (progress_.value / 100.0f), p.y + 2}, c);
+            dl->AddRectFilled({p.x, p.y - 1}, {p.x + width * (progress_.value / 100.0f), p.y + 1}, c);
         }
     }
-    ImGui::Dummy({width, 3});
+    ImGui::Dummy({width, 4});
 }
 
 void TerminalPanel::DrawMenuItems()

@@ -92,6 +92,9 @@ struct SessionUsage
 {
     std::string           sessionId;
     double                costUsd = 0.0; // API-list-price cost Claude Code counted for this session
+    std::string           model;         // "Opus 5.5" — the model the session runs on right now
+    std::string           modelId;       // "claude-opus-5-5"
+    std::string           effort;        // "medium", "xhigh", … ("" if not reported)
     std::optional<Window> fiveHour;
     std::optional<Window> sevenDay;
     std::int64_t          updatedAtMs = 0; // when the file was written

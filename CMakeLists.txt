@@ -51,6 +51,7 @@ add_library(claudeui_core STATIC
   src/sessions/session_scanner.cpp
   src/sessions/live_sessions.cpp
   src/usage/usage.cpp
+  src/usage/model_usage.cpp
   src/config/app_settings.cpp
   src/config/font_catalog.cpp
   src/config/json_file.cpp
@@ -79,6 +80,10 @@ add_executable(claudeui
   src/ui/usage_panel.cpp
   src/ui/layout_panel.cpp
   src/ui/icons.cpp
+  src/ui/rail.cpp
+  src/ui/model_usage_chart.cpp
+  src/ui/widgets.cpp
+  src/ui/stats_view.cpp
 )
 target_link_libraries(claudeui PRIVATE claudeui_core imgui)
 target_compile_options(claudeui PRIVATE ${CLAUDEUI_WARNINGS})

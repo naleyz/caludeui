@@ -287,22 +287,21 @@ void SessionTabs::Draw()
                 while (cut > 0 && (static_cast<unsigned char>(title[cut]) & 0xC0) == 0x80) --cut;
                 title = title.substr(0, cut) + "…";
             }
-            std::string label = title + "###tab" + std::to_string(t->Uid());
-
-            bool styled = true;
-            switch (t->GetStatus())
-            {
-            case TerminalPanel::Status::Busy:    ImGui::PushStyleColor(ImGuiCol_Text, theme::palette::Orange); break;
-            case TerminalPanel::Status::Waiting: ImGui::PushStyleColor(ImGuiCol_Text, theme::palette::Blue); break;
-            case TerminalPanel::Status::Exited:
-            case TerminalPanel::Status::Blocked:
-            case TerminalPanel::Status::Failed:  ImGui::PushStyleColor(ImGuiCol_Text, theme::palette::MidGray); break;
-            default: styled = false; break;
-            }
+            // Leading room for the status dot, drawn over the tab once it's laid out.
+            std::string label = "    " + title + "###tab" + std::to_string(t->Uid());
 
             bool open = true;
+            const bool dim = t->GetStatus() == TerminalPanel::Status::Exited || t->GetStatus() == TerminalPanel::Status::Failed ||
+                             t->GetStatus() == TerminalPanel::Status::Blocked;
+            if (dim) ImGui::PushStyleColor(ImGuiCol_Text, theme::palette::MidGray);
             const bool selected = ImGui::BeginTabItem(label.c_str(), &open, flags);
-            if (styled) ImGui::PopStyleColor();
+            if (dim) ImGui::PopStyleColor();
+            {
+                const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
+                const float r = ImGui::GetFontSize() * 0.22f;
+                ImGui::GetWindowDrawList()->AddCircleFilled({a.x + ImGui::GetStyle().FramePadding.x + r + 1.0f, (a.y + b.y) * 0.5f}, r,
+                                                            t->StatusColor());
+            }
 
             // Progress (OSC 9;4) as a line along the tab's bottom edge.
             auto prog = t->Progress();
