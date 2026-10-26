@@ -1,0 +1,14 @@
+build/
+.cache/
+# runtime ImGui layout, rewritten on every run
+imgui.ini
+claudeui_layout.ini
+
+# Anthropic's fonts and icon assets are not redistributable: keep them local.
+# The app runs without them (see assets/fonts/README.md).
+assets/fonts/*
+!assets/fonts/README.md
+assets/icons/
+
+# Project notes for Claude Code: local only, not published.
+CLAUDE.md
